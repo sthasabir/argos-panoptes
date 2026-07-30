@@ -1,0 +1,17 @@
+# Secrets — never commit
+spike/.tsenta_token.json
+*.token.json
+.tsenta_token.json
+.env
+*.pem
+service-account*.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+state/
+
+# debug artifacts
+*.log

@@ -1,0 +1,13 @@
+.tsenta_token.json
+spike/.tsenta_token.json
+__pycache__/
+*.pyc
+.venv/
+venv/
+state/
+test_*.py
+cron_test.py
+live_apply.py
+spike/
+*.log
+.git/

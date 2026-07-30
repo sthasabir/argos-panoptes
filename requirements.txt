@@ -1,0 +1,8 @@
+fastapi==0.115.12
+uvicorn[standard]
+mcp==1.23.3
+google-genai==2.7.0
+google-cloud-storage
+google-cloud-secret-manager
+httpx
+pydantic>=2
