@@ -3,6 +3,7 @@ spike/.tsenta_token.json
 *.token.json
 .tsenta_token.json
 .env
+.env.bak
 *.pem
 service-account*.json
 
@@ -15,3 +16,6 @@ state/
 
 # debug artifacts
 *.log
+
+# Claude Code session state — not part of the project
+.claude/

@@ -210,40 +210,11 @@ async def run(n: int = PER_RUN, dry: bool = True, simulate: bool = False,
 
         # 5) dedup vs already-applied (by job_id AND normalized company::title,
         #    since Tsenta rotates job_ids for the same posting)
-        # Tsenta is the authority on what has been applied to; local state is a cache
-        # that can race or miss applications made outside this agent. Fold its record in
-        # before deciding anything is "fresh".
-        try:
-            added = await st.reconcile_from_tsenta(mcp, state)
-            if added:
-                print(f"reconcile: +{added} application(s) known to Tsenta but not to us")
-                st.save_merged(state)
-        except Exception as e:
-            print("reconcile skipped:", str(e)[:120])
         seen_ids = st.applied_job_ids(state)
         seen_fps = st.applied_fingerprints(state)
-        # is_duplicate() also catches the same posting under a different company name
-        # ("Walmart" vs "Walmart Global Tech"), which matters now that a job can arrive
-        # from Tsenta's feed AND an external scraper in the same run.
-        seen_urls = st.applied_urls(state)
         fresh = [s for s in survivors
                  if s.get("job_id") not in seen_ids
-                 and st.norm_url(s.get("url")) not in seen_urls
-                 and not st.is_duplicate(s.get("company"), s.get("title"), seen_fps)]
-
-        # Dedup WITHIN this run too: two sources can both surface the same job, and
-        # neither is in seen_fps yet, so the exact-match check above would pass both.
-        _batch, fresh = set(), [j for j in fresh]
-        _deduped = []
-        for s in fresh:
-            fp = st.fingerprint(s.get("company"), s.get("title"))
-            if fp in _batch or any(st.same_posting(fp, b) for b in _batch):
-                continue
-            _batch.add(fp)
-            _deduped.append(s)
-        if len(_deduped) != len(fresh):
-            print(f"dedup: dropped {len(fresh) - len(_deduped)} same-run duplicate(s)")
-        fresh = _deduped
+                 and st.fingerprint(s.get("company"), s.get("title")) not in seen_fps]
 
         # 5b) throttle per employer. Nine applications went to PNC in two days before
         #     this existed — all auto-generated, all into one ATS queue. Counts prior
@@ -312,14 +283,9 @@ async def run(n: int = PER_RUN, dry: bool = True, simulate: bool = False,
                 else:
                     await mcp.apply_to_job(job_id=s["job_id"])
                 st.record(state, s, "applied")
-                # Persist immediately. Saving once after the loop meant a crash (or a
-                # kill) between applying and saving left the application submitted but
-                # unrecorded -- and the next run would apply to it again.
-                st.save_merged(state)
                 applied.append(s)
             except Exception as e:
                 st.record(state, s, "error")
-                st.save_merged(state)
                 errors.append({"job": s.get("title"), "error": str(e)[:160]})
             if i < len(chosen) - 1:
                 await asyncio.sleep(random.uniform(*JITTER))
