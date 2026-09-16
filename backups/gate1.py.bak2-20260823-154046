@@ -43,14 +43,9 @@ REJECT_ENTRY_LEVEL = os.environ.get(
 #
 # AVP / Assistant Vice President is now excluded too, by request.
 TITLE_MANAGEMENT = re.compile(
-    r"\b(engineering\s+manager|people\s+manager|manager|mgr|director|dir|"
+    r"\b(engineering\s+manager|people\s+manager|manager|director|"
     r"head\s+of|chief|cto|cio|partner|vp|svp|evp|avp)\b"
     r"|\bvice\s+president\b|\bpresident\b", re.I)
-# "mgr"/"dir" are NOT redundant with manager/director: the feed emits abbreviated
-# titles ("Mgr, Digital Engineering" @ Thrivent, "Sr Mgr, Software Engineering") that
-# the spelled-out words never matched. One rode past Gate 1 on 2026-08-22 and was
-# stopped only by the Gate 2 scorer noticing it was a manager role — a backstop, not
-# the rule. Deliberately NOT adding "gm": General Motors is a real employer here.
 
 # "Engineer II" / "Developer II" — one rung below the target band. \bii\b cannot fire
 # inside "III" (no word boundary before the third I), so Engineer III still passes.
