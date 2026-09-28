@@ -10,7 +10,7 @@ read the flags below rather than assuming the new-grad case.
 CANDIDATE = {
     "name": "Jordan Rivera",
     "level": "senior_ic",            # experienced individual contributor, not new grad
-    "years_experience": 7,
+    "years_experience": 8,
     "needs_sponsorship": False,       # U.S. Permanent Resident (Green Card)
     "work_authorization": "U.S. Permanent Resident (Green Card)",
     "locations_ok": ["Remote", "US"],
