@@ -29,6 +29,8 @@ from mcp.client.streamable_http import streamablehttp_client
 from mcp.client.auth import OAuthClientProvider, TokenStorage
 from mcp.shared.auth import OAuthToken, OAuthClientInformationFull, OAuthClientMetadata
 
+from profile import CANDIDATE, REQUIRE_US_LOCATION, ALLOWED_WORKPLACE, JOB_TYPES
+
 SERVER_URL = os.environ.get("TSENTA_MCP_URL", "https://api.autojobs.me/api/v1/mcp")
 TOKEN_ENDPOINT = os.environ.get("TSENTA_TOKEN_URL", "https://api.autojobs.me/oauth/token")
 CALLBACK_PORT = int(os.environ.get("TSENTA_OAUTH_PORT", "8765"))
@@ -72,12 +74,23 @@ async def prime_token(storage: "TokenStorage") -> None:
         return
     sd = {"tokens": tokens.model_dump(exclude_none=True),
           "client_info": info.model_dump(exclude_none=True, mode="json")}
-    try:
-        updated = await asyncio.to_thread(_refresh_access_token, sd)
-        if updated:
-            await storage.set_tokens(OAuthToken.model_validate(updated))
-    except Exception as e:
-        print("prime_token: refresh failed, falling back to stored token:", str(e)[:120])
+    # Retry: a single transient failure from the token endpoint used to cost the whole
+    # run. Falling back to the stored (expired) token doesn't help — the SDK then tries
+    # its own refresh, fails, and raises "Interactive OAuth required but running
+    # headless", 500-ing the request. Three hourly runs were lost to this on 2026-08-18.
+    last = None
+    for attempt in range(3):
+        try:
+            updated = await asyncio.to_thread(_refresh_access_token, sd)
+            if updated:
+                await storage.set_tokens(OAuthToken.model_validate(updated))
+            return
+        except Exception as e:
+            last = e
+            if attempt < 2:
+                await asyncio.sleep(2 * (attempt + 1))
+    print("prime_token: refresh failed after 3 attempts, falling back to stored token:",
+          str(last)[:120])
 
 
 # ---------------------------------------------------------------- token storage
@@ -263,7 +276,27 @@ class TsentaMCP:
 
     async def get_recommendations(self, limit: int = 20, date_posted: str = "30d",
                                    page: int = 1, extra: dict | None = None) -> dict:
+        """Ask the server for jobs we'd actually keep.
+
+        The feed is filtered SERVER-SIDE wherever the API supports it. Pulling
+        unfiltered and discarding locally wasted most of every page — 145 of 200
+        recommendations were non-US — which starved the pipeline no matter how many
+        pages we paged through. Gate 1 still re-checks everything; this just stops us
+        spending the page budget on jobs that could never qualify.
+        """
         args = {"limit": min(limit, 50), "datePosted": date_posted, "page": page}
+        if REQUIRE_US_LOCATION:
+            args["locations"] = ["country:US"]
+        # Only constrain workplace type when it actually narrows anything — sending all
+        # three is a no-op that risks excluding rows with a null workplaceType.
+        if ALLOWED_WORKPLACE and ALLOWED_WORKPLACE < {"REMOTE", "HYBRID", "ONSITE"}:
+            args["workplaceTypes"] = sorted(ALLOWED_WORKPLACE)
+        if JOB_TYPES:
+            args["jobTypes"] = sorted(JOB_TYPES)
+        if not CANDIDATE.get("needs_sponsorship"):
+            # Permanent resident: don't let the profile default hide roles that
+            # simply don't offer sponsorship.
+            args["needsSponsorship"] = False
         if extra:
             args.update(extra)
         return await self._call_json("get-job-recommendations", args)

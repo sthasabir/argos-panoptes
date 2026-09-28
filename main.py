@@ -44,5 +44,8 @@ def get_state():
         "total": len(apps),
         "by_status": dict(Counter(a.get("status") for a in apps)),
         "applied_today": st.applied_today_count(s),
+        # Jobs the agent deliberately did NOT apply to because they pay above the
+        # stated ask — waiting on a decision, not lost.
+        "held_for_review": st.held(s),
         "recent": apps[-15:],
     }

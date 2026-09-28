@@ -16,7 +16,6 @@ Zero LLM tokens here — pure HTTP + parsing. Filtering is left to the gates.
 from __future__ import annotations
 
 import hashlib
-import html
 import os
 import re
 import time
@@ -275,194 +274,8 @@ def from_indeed() -> list[dict]:
     return out
 
 
-
-# ---------------------------------------------------------------- Apify
-# Job-board scrapers run on Apify. This is the one external source that actually
-# works: the Indeed actor returns `externalApplyLink` (the employer's real ATS URL,
-# not an indeed.com redirect) AND the full description inline, so the pipeline never
-# has to call fetch-job-description -- which is exactly what killed the LinkedIn
-# adapter, where a linkedin.com/jobs/view page returns 0 characters.
-#
-# MODES -- this is the cost lever:
-#   pull (default)  read the actor's LAST successful run. Fast and cheap. Schedule the
-#                   actor inside Apify (every few hours) and just read the results.
-#   run             trigger a fresh synchronous scrape per query. Freshest, but costs
-#                   compute every call and the 39-board actor can take minutes.
-APIFY_MODE = os.environ.get("APIFY_MODE", "pull")
-APIFY_ACTORS = [s.strip() for s in os.environ.get("APIFY_ACTORS", "indeed").split(",") if s.strip()]
-APIFY_QUERIES = [q.strip() for q in os.environ.get(
-    "APIFY_QUERIES", "software engineer|java developer|senior software engineer").split("|") if q.strip()]
-APIFY_LOCATION = os.environ.get("APIFY_LOCATION", "United States")
-APIFY_COUNTRY = os.environ.get("APIFY_COUNTRY", "US")                      # Indeed wants the CODE
-APIFY_COUNTRY_NAME = os.environ.get("APIFY_COUNTRY_NAME", "United States")  # all-jobs wants the FULL NAME
-APIFY_MAX = int(os.environ.get("APIFY_MAX", "30"))
-APIFY_PULL_LIMIT = int(os.environ.get("APIFY_PULL_LIMIT", "300"))
-
-# Actor ids use "~" in the API path, not "/".
-_APIFY_ACTOR_MAP = {
-    # Minimal valid all-jobs input is keyword + country (FULL NAME) + max_results.
-    # Passing a country into the optional `location` field (it wants a city) -> HTTP 400.
-    "all-jobs": ("agentx~all-jobs-scraper", lambda q: {
-        "keyword": q, "country": APIFY_COUNTRY_NAME, "max_results": APIFY_MAX}),
-    "indeed": ("misceres~indeed-scraper", lambda q: {
-        "position": q, "location": APIFY_LOCATION, "country": APIFY_COUNTRY,
-        "maxItemsPerSearch": APIFY_MAX, "followApplyRedirects": True,
-        "saveOnlyUniqueItems": True}),
-    "linkedin-apify": ("curious_coder~linkedin-jobs-scraper", lambda q: {
-        "keywords": q, "location": APIFY_LOCATION, "limitPerSource": APIFY_MAX}),
-}
-
-
-# Tsenta only drives recognised ATS platforms. Measured 2026-08-21 by calling
-# apply-to-job against real postings: careers.walmart.com, careers.garmin.com,
-# careers.leidos.com and www.uline.jobs were ALL refused with "we don't support that
-# application system yet (unknown)" -- and so was linkedin.com. Rejections cost no
-# credit, but they do cost a Gate 2 scoring call, so screen them out here instead.
-# This is an ALLOWLIST: a vanity careers domain is assumed unsupported until proven
-# otherwise, because that is what the evidence shows.
-SUPPORTED_ATS = (
-    "myworkdayjobs.com", "myworkdaysite.com",     # Workday
-    "greenhouse.io", "job-boards.greenhouse.io",  # Greenhouse
-    "lever.co",                                   # Lever
-    "ashbyhq.com",                                # Ashby
-    "workable.com",                               # Workable
-    "oraclecloud.com", "fa.ocs.oraclecloud.com",  # Oracle Cloud
-    "smartrecruiters.com",                        # SmartRecruiters
-    "jobvite.com",                                # Jobvite
-    "applytojob.com",                             # JazzHR
-    "workforcenow.adp.com",                       # ADP -- ONLY this subdomain.
-                                                  # myjobs.adp.com was refused
-                                                  # ("unknown") on 2026-08-21.
-    "ultipro.com",                                # UKG/UltiPro -- verified supported
-                                                  # 2026-08-21 (a real apply succeeded)
-    "gem.com",                                    # Gem
-    "icims.com",                                  # iCIMS
-    "bamboohr.com",                               # BambooHR
-)
-
-
-def _ats_supported(host: str) -> bool:
-    return bool(host) and any(a in host for a in SUPPORTED_ATS)
-
-
-def _apify_str(v) -> str | None:
-    """Flatten a scraped value to a plain string. Actors return lists for fields the
-    pipeline expects as scalars (Indeed's employmentType is ["Full-time"])."""
-    if v is None:
-        return None
-    if isinstance(v, (list, tuple, set)):
-        parts = [str(x) for x in v if x]
-        return ", ".join(parts) if parts else None
-    return str(v)
-
-
-def _apify_pick(j: dict, *keys):
-    for k in keys:
-        v = j.get(k)
-        if v:
-            return v
-    return None
-
-
-def _apify_norm(j: dict) -> dict | None:
-    """Normalise one scraped row. Actors disagree on every field name, so try several."""
-    if not isinstance(j, dict) or j.get("isExpired") or j.get("error"):
-        return None
-    title = _apify_pick(j, "positionName", "title", "jobTitle", "position", "name")
-    company = _apify_pick(j, "company", "companyName", "company_name", "employer", "organization")
-    # externalApplyLink / official_url point at the employer's real ATS. Prefer them over
-    # the board's own view page, which Tsenta cannot submit through.
-    url = _apify_pick(j, "externalApplyLink", "official_url", "applyUrl",
-                      "jobUrl", "link", "url", "platform_url")
-    if not (title and url):
-        return None
-    # A board VIEW page is not appliable: Tsenta drives real ATS forms, and an
-    # indeed.com/viewjob or linkedin.com/jobs/view URL has no form it can fill. The
-    # scraper only sometimes resolves the employer's own link (externalApplyLink); when
-    # it falls back to the board page the row is worthless to us, so drop it here rather
-    # than spend a credit discovering that at apply time.
-    _host = str(url).split("/")[2].lower() if "//" in str(url) else ""
-    if not _ats_supported(_host):
-        return None
-    desc = _apify_pick(j, "description", "descriptionText", "jobDescription", "descriptionHtml") or ""
-    desc = html.unescape(re.sub(r"<[^>]+>", " ", str(desc)))
-    desc = re.sub(r"\s+", " ", desc).strip()[:10000]
-    loc = _apify_pick(j, "location", "job_location", "jobLocation", "city")
-    posted = str(_apify_pick(j, "postedAt", "datePosted", "postingDateParsed",
-                             "date_posted", "publishedAt") or "")[:10]
-    return {
-        "id": _eid("apify", str(url)),
-        "title": str(title)[:120],
-        "companyName": company,
-        "url": str(url),
-        "datePosted": posted,
-        "seniorityLevel": _apify_pick(j, "job_level", "seniorityLevel"),
-        "yearsOfExperienceMin": None,
-        "sponsorship": None,
-        "roleFamily": None,
-        "skillTags": None,
-        "matchScore": None,
-        "locations": [loc] if isinstance(loc, str) and loc else (loc or None),
-        "salaryMin": _apify_pick(j, "salaryMin", "salary_min"),
-        "salaryMax": _apify_pick(j, "salaryMax", "salary_max"),
-        "salaryCurrency": "USD",
-        # Indeed returns employmentType as a LIST (["Full-time"]); gate1.is_full_time()
-        # calls .upper() on it, so flatten to a string here or the whole run dies.
-        "employmentType": _apify_str(_apify_pick(j, "jobType", "employmentType", "job_type")),
-        "description": desc,
-        "source": "apify",
-        "external": True,
-    }
-
-
-def from_apify() -> list[dict]:
-    """Pull scraped jobs from the configured Apify actors."""
-    token = os.environ.get("APIFY_TOKEN")
-    if not token:
-        return []
-    # Token goes in the auth HEADER. As a ?token= query param it lands in logs on error.
-    hdr = {"Authorization": "Bearer %s" % token}
-    seen, out = set(), []
-    for name in APIFY_ACTORS:
-        entry = _APIFY_ACTOR_MAP.get(name)
-        if not entry:
-            print("sources.apify: unknown actor", name)
-            continue
-        actor, mk_input = entry
-        batches = []
-        try:
-            if APIFY_MODE == "pull":
-                r = httpx.get(
-                    "https://api.apify.com/v2/acts/%s/runs/last/dataset/items" % actor,
-                    params={"status": "SUCCEEDED", "limit": APIFY_PULL_LIMIT},
-                    headers=hdr, timeout=120)
-                r.raise_for_status()
-                batches = [r.json()]
-            else:
-                for q in APIFY_QUERIES:
-                    r = httpx.post(
-                        "https://api.apify.com/v2/acts/%s/run-sync-get-dataset-items" % actor,
-                        params={"timeout": 150}, json=mk_input(q),
-                        headers=hdr, timeout=200)
-                    r.raise_for_status()
-                    batches.append(r.json())
-        except Exception as e:
-            # One misconfigured actor must not take down the whole run.
-            print("sources.apify:", name, "failed:", str(e)[:140])
-            continue
-        for items in batches:
-            for row in (items if isinstance(items, list) else []):
-                nj = _apify_norm(row)
-                if nj and nj["url"] not in seen:
-                    seen.add(nj["url"])
-                    out.append(nj)
-    print("sources.apify: %d jobs from %s (mode=%s)" % (len(out), ",".join(APIFY_ACTORS), APIFY_MODE))
-    return out
-
-
 # ---------------------------------------------------------------- gather
-_ADAPTERS = {"github": from_github, "linkedin": from_linkedin,
-             "indeed": from_indeed, "apify": from_apify}
+_ADAPTERS = {"github": from_github, "linkedin": from_linkedin, "indeed": from_indeed}
 
 
 def gather_external(sources: str | None = None) -> list[dict]:
@@ -470,8 +283,6 @@ def gather_external(sources: str | None = None) -> list[dict]:
     enabled = [s.strip() for s in (sources
                if sources is not None else os.environ.get("EXTERNAL_SOURCES", "")).split(",")
                if s.strip()]
-    if not enabled:
-        print("sources: EXTERNAL_SOURCES is empty — no adapters enabled, gathering nothing")
     seen, merged = set(), []
     for name in enabled:
         fn = _ADAPTERS.get(name)
@@ -493,12 +304,7 @@ def gather_external(sources: str | None = None) -> list[dict]:
 
 if __name__ == "__main__":
     import json
-    # NOT setdefault: .env exports EXTERNAL_SOURCES="" (set-but-empty), which setdefault
-    # will not overwrite — so this fallback never fired and `./dev.sh sources` reported
-    # "gathered 0" and exited 0, looking like a clean run.
-    if not os.environ.get("EXTERNAL_SOURCES", "").strip():
-        os.environ["EXTERNAL_SOURCES"] = "github,linkedin"
-        print("EXTERNAL_SOURCES empty -> defaulting to github,linkedin for this run")
+    os.environ.setdefault("EXTERNAL_SOURCES", "github,linkedin")
     jobs = gather_external()
     print(f"gathered {len(jobs)}")
     for j in jobs[:10]:

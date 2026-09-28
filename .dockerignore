@@ -1,5 +1,11 @@
 .tsenta_token.json
 spike/.tsenta_token.json
+# Credentials must never enter the image. On Cloud Run the service authenticates as
+# its own runtime service account and reads the Tsenta token from Secret Manager, so
+# neither of these is needed at runtime — baking them in would ship a live key.
+service-account*.json
+.env
+*.pem
 __pycache__/
 *.pyc
 .venv/

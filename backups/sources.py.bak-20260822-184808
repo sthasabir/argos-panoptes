@@ -470,8 +470,6 @@ def gather_external(sources: str | None = None) -> list[dict]:
     enabled = [s.strip() for s in (sources
                if sources is not None else os.environ.get("EXTERNAL_SOURCES", "")).split(",")
                if s.strip()]
-    if not enabled:
-        print("sources: EXTERNAL_SOURCES is empty — no adapters enabled, gathering nothing")
     seen, merged = set(), []
     for name in enabled:
         fn = _ADAPTERS.get(name)
@@ -493,12 +491,7 @@ def gather_external(sources: str | None = None) -> list[dict]:
 
 if __name__ == "__main__":
     import json
-    # NOT setdefault: .env exports EXTERNAL_SOURCES="" (set-but-empty), which setdefault
-    # will not overwrite — so this fallback never fired and `./dev.sh sources` reported
-    # "gathered 0" and exited 0, looking like a clean run.
-    if not os.environ.get("EXTERNAL_SOURCES", "").strip():
-        os.environ["EXTERNAL_SOURCES"] = "github,linkedin"
-        print("EXTERNAL_SOURCES empty -> defaulting to github,linkedin for this run")
+    os.environ.setdefault("EXTERNAL_SOURCES", "github,linkedin")
     jobs = gather_external()
     print(f"gathered {len(jobs)}")
     for j in jobs[:10]:
